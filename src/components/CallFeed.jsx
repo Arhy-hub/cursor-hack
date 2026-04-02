@@ -37,12 +37,10 @@ export default function CallFeed({ lines, interimText, incidentModel, audioMode 
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [lines, interimText])
 
-  const isLive = audioMode === 'live'
-
   return (
     <div className="flex flex-col h-full bg-[#0a0a14]">
       <div className="px-4 py-3 border-b border-slate-700 flex items-center gap-2">
-        {isLive ? (
+        {audioMode === 'live' && (
           <>
             <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
@@ -50,22 +48,31 @@ export default function CallFeed({ lines, interimText, incidentModel, audioMode 
             </span>
             <span className="text-xs font-bold tracking-widest text-red-400">LIVE AUDIO</span>
           </>
-        ) : (
+        )}
+        {audioMode === 'file' && (
           <>
-            <span className="h-2.5 w-2.5 rounded-full bg-yellow-500 flex-shrink-0" />
-            <span className="text-xs font-bold tracking-widest text-yellow-400">FALLBACK MODE — SCRIPTED SCENARIO</span>
+            <span className="h-2.5 w-2.5 rounded-full bg-blue-500 flex-shrink-0" />
+            <span className="text-xs font-bold tracking-widest text-blue-400">FILE PLAYBACK</span>
           </>
+        )}
+        {audioMode === 'idle' && (
+          <span className="text-xs text-slate-600 tracking-widest">IDLE</span>
         )}
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-1 text-xs font-mono">
         {lines.map((line, i) => {
           const isLatest = i === lines.length - 1
+          const conf = line.confidence
+          const confColor = conf == null ? '' : conf >= 0.9 ? 'text-green-500' : conf >= 0.7 ? 'text-yellow-500' : 'text-red-500'
           return (
             <div key={i} className={`py-1 px-2 rounded transition-opacity ${isLatest ? 'opacity-100' : 'opacity-50'}`}>
               <span className="text-slate-500 mr-2">{line.timestamp}</span>
               <span className="text-slate-400 mr-2">[{line.speaker?.toUpperCase()}]</span>
               <span className="text-slate-200">{line.text}</span>
+              {conf != null && (
+                <span className={`ml-2 text-xs ${confColor}`}>{Math.round(conf * 100)}%</span>
+              )}
             </div>
           )
         })}

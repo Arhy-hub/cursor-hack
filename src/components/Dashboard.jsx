@@ -6,13 +6,13 @@ import SupervisorQueue from './SupervisorQueue.jsx'
 import AudioCapture from './AudioCapture.jsx'
 import { runAgentLoop } from '../agent/loop.js'
 import { units as initialUnits } from '../data/units.js'
-import { scenario } from '../data/scenario.js'
 
 const freshUnits = initialUnits.map(u => ({ ...u, status: 'available', assignedTo: null }))
 
 export default function Dashboard() {
   const [listening, setListening] = useState(false)
   const [audioMode, setAudioMode] = useState('idle')
+  const [audioStream, setAudioStream] = useState(null)
   const [transcriptLines, setTranscriptLines] = useState([])
   const [interimText, setInterimText] = useState('')
   const [incidentModel, setIncidentModel] = useState(null)
@@ -28,9 +28,8 @@ export default function Dashboard() {
   const incidentsRef = useRef([])
   const unitsRef = useRef(freshUnits)
   const supervisorQueueRef = useRef([])
-  const scenarioIdx = useRef(0)
-  const scenarioTimer = useRef(null)
   const resolveEscalationRef = useRef(null)
+  const fileInputRef = useRef(null)
 
   useEffect(() => { transcriptRef.current = transcriptLines }, [transcriptLines])
   useEffect(() => { incidentModelRef.current = incidentModel }, [incidentModel])
@@ -116,43 +115,106 @@ export default function Dashboard() {
     resolveEscalationRef.current = null
   }, [addLog])
 
-  const startFallback = useCallback(() => {
-    setAudioMode('fallback')
-    const tick = () => {
-      if (scenarioIdx.current >= scenario.lines.length) return
-      const line = scenario.lines[scenarioIdx.current++]
-      processTranscriptLine(line)
-      if (scenarioIdx.current < scenario.lines.length) {
-        scenarioTimer.current = setTimeout(tick, 8000)
-      }
-    }
-    scenarioTimer.current = setTimeout(tick, 1500)
-  }, [processTranscriptLine])
-
-  const handleToggle = useCallback(() => {
+  const handleToggle = useCallback(async () => {
     if (!listening) {
-      setListening(true)
+      try {
+        const captureStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
+        if (!captureStream.getAudioTracks().length) {
+          captureStream.getTracks().forEach(t => t.stop())
+          addLog({ type: 'ERROR', message: 'No audio track captured — make sure to tick "Share system audio" in the dialog', timestamp: new Date().toISOString() })
+          return
+        }
+        const audioOnlyStream = new MediaStream(captureStream.getAudioTracks())
+        captureStream.getAudioTracks()[0].addEventListener('ended', () => {
+          captureStream.getTracks().forEach(t => t.stop())
+          setListening(false)
+          setAudioStream(null)
+          setAudioMode('idle')
+        })
+        setAudioStream({ capture: captureStream, audio: audioOnlyStream })
+        setListening(true)
+      } catch {
+        // user cancelled — stay idle
+      }
     } else {
+      audioStream?.capture?.getTracks().forEach(t => t.stop())
+      setAudioStream(null)
       setListening(false)
-      if (scenarioTimer.current) clearTimeout(scenarioTimer.current)
+      setAudioMode('idle')
     }
-  }, [listening])
+  }, [listening, audioStream, addLog])
+
+  const handleFileUpload = useCallback(async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''
+
+    const apiKey = import.meta.env.VITE_DEEPGRAM_API_KEY
+    if (!apiKey) {
+      addLog({ type: 'ERROR', message: 'VITE_DEEPGRAM_API_KEY is not set', timestamp: new Date().toISOString() })
+      return
+    }
+
+    addLog({ type: 'PROCESSING', message: `Transcribing file: ${file.name}`, timestamp: new Date().toISOString() })
+    setAudioMode('file')
+
+    try {
+      const res = await fetch(
+        'https://api.deepgram.com/v1/listen?model=nova-2&language=en-GB&smart_format=true&punctuate=true&utterances=true',
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Token ${apiKey}`,
+            'Content-Type': file.type || 'audio/wav'
+          },
+          body: file
+        }
+      )
+
+      if (!res.ok) throw new Error(`Deepgram returned ${res.status}`)
+
+      const data = await res.json()
+      const utterances = data.results?.utterances
+
+      if (!utterances?.length) {
+        addLog({ type: 'ERROR', message: 'No speech detected in file', timestamp: new Date().toISOString() })
+        return
+      }
+
+      addLog({ type: 'VERIFIED', message: `File transcribed — ${utterances.length} utterances found`, timestamp: new Date().toISOString() })
+
+      for (const utt of utterances) {
+        const mins = Math.floor(utt.start / 60)
+        const secs = Math.floor(utt.start % 60)
+        const timestamp = `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`
+        await processTranscriptLine({ timestamp, speaker: 'caller', text: utt.transcript.trim(), confidence: utt.confidence ?? null })
+      }
+    } catch (err) {
+      addLog({ type: 'ERROR', message: `File transcription failed: ${err.message}`, timestamp: new Date().toISOString() })
+      setAudioMode('idle')
+    }
+  }, [addLog, processTranscriptLine])
 
   const handleModeChange = useCallback((mode) => {
-    if (mode === 'fallback' && audioMode !== 'fallback') {
-      startFallback()
-    } else if (mode === 'live') {
-      setAudioMode('live')
-    }
-  }, [audioMode, startFallback])
+    if (mode === 'live') setAudioMode('live')
+  }, [])
 
   return (
     <div className="h-screen w-screen flex flex-col bg-[#0a0a0f] overflow-hidden">
       <AudioCapture
-        active={listening}
+        stream={audioStream}
         onTranscriptChunk={processTranscriptLine}
         onInterim={setInterimText}
         onModeChange={handleModeChange}
+        onLog={addLog}
+      />
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="audio/*"
+        className="hidden"
+        onChange={handleFileUpload}
       />
 
       {/* Header */}
@@ -162,11 +224,14 @@ export default function Dashboard() {
           <span className="text-slate-500 text-xs tracking-wider hidden sm:block">COMMAND &amp; LOCATE FOR ACTIVE WORKING RESCUES</span>
         </div>
 
-        <span className="ml-4 bg-yellow-500/20 text-yellow-400 border border-yellow-600 text-xs px-2 py-0.5 rounded tracking-widest font-bold">
-          TRAINING MODE
-        </span>
 
         <div className="ml-auto flex items-center gap-3">
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="text-xs font-bold tracking-widest px-4 py-1.5 rounded border transition-all bg-slate-800 text-slate-300 border-slate-600 hover:bg-slate-700"
+          >
+            UPLOAD FILE
+          </button>
           <button
             onClick={handleToggle}
             className={`text-xs font-bold tracking-widest px-4 py-1.5 rounded border transition-all ${
@@ -175,7 +240,7 @@ export default function Dashboard() {
                 : 'bg-green-900/50 text-green-300 border-green-700 hover:bg-green-900'
             }`}
           >
-            {listening ? 'STOP' : 'START LISTENING'}
+            {listening ? 'STOP' : 'CAPTURE AUDIO'}
           </button>
         </div>
       </header>
@@ -204,7 +269,6 @@ export default function Dashboard() {
           </div>
 
           <div className="flex-1 overflow-y-auto p-3 space-y-5">
-            {/* Unit Fleet */}
             <section>
               <p className="text-xs text-slate-500 tracking-widest mb-2">UNIT FLEET</p>
               <div className="space-y-1.5">
@@ -221,13 +285,11 @@ export default function Dashboard() {
               </div>
             </section>
 
-            {/* Active Incidents */}
             <section>
               <p className="text-xs text-slate-500 tracking-widest mb-2">ACTIVE INCIDENTS</p>
               <ActiveIncidents incidents={incidents} />
             </section>
 
-            {/* Supervisor Queue */}
             <section>
               <p className="text-xs text-slate-500 tracking-widest mb-2">
                 SUPERVISOR QUEUE

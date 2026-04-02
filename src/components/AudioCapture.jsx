@@ -1,80 +1,107 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
+import { DeepgramClient } from '@deepgram/sdk'
 
-export default function AudioCapture({ active, onTranscriptChunk, onInterim, onModeChange }) {
-  const recognitionRef = useRef(null)
-  const [micStatus, setMicStatus] = useState('IDLE')
+function pad(n) {
+  return String(n).padStart(2, '0')
+}
+
+function nowTs() {
+  const now = new Date()
+  return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
+}
+
+export default function AudioCapture({ stream, onTranscriptChunk, onInterim, onModeChange, onLog }) {
+  const mediaRecorderRef = useRef(null)
+  const socketRef = useRef(null)
 
   useEffect(() => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
-    if (!SpeechRecognition) {
-      onModeChange('fallback')
+    const audioStream = stream?.audio ?? null
+    if (audioStream) {
+      startDeepgram(audioStream)
+    }
+    return () => stopTranscription()
+  }, [stream])
+
+  async function startDeepgram(audioStream) {
+    const apiKey = import.meta.env.VITE_DEEPGRAM_API_KEY
+    if (!apiKey) {
+      onLog({ type: 'ERROR', message: 'VITE_DEEPGRAM_API_KEY is not set', timestamp: new Date().toISOString() })
       return
     }
 
-    const recognition = new SpeechRecognition()
-    recognition.continuous = true
-    recognition.interimResults = true
-    recognition.lang = 'en-GB'
+    const tracks = audioStream.getAudioTracks()
+    onLog({ type: 'PROCESSING', message: `Audio stream acquired — ${tracks.length} track(s): ${tracks.map(t => t.label || t.id).join(', ')}`, timestamp: new Date().toISOString() })
 
-    recognition.onresult = (event) => {
-      let interim = ''
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const transcript = event.results[i][0].transcript
-        if (event.results[i].isFinal) {
-          const now = new Date()
-          const timestamp = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`
-          onTranscriptChunk({ timestamp, speaker: 'caller', text: transcript.trim() })
+    try {
+      const dg = new DeepgramClient({ apiKey })
+      const socket = await dg.listen.v1.connect({
+        model: 'nova-2',
+        language: 'en-GB',
+        smart_format: true,
+        punctuate: true,
+        interim_results: true,
+        utterance_end_ms: 1000
+      })
+      socketRef.current = socket
+
+      socket.on('open', () => {
+        onLog({ type: 'VERIFIED', message: 'Deepgram connection open — recording started', timestamp: new Date().toISOString() })
+
+        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+          ? 'audio/webm;codecs=opus'
+          : 'audio/webm'
+
+        let chunkCount = 0
+        const recorder = new MediaRecorder(audioStream, { mimeType })
+        mediaRecorderRef.current = recorder
+
+        recorder.addEventListener('dataavailable', (e) => {
+          if (e.data.size > 0 && socket.readyState === WebSocket.OPEN) {
+            socket.send(e.data)
+            chunkCount++
+            if (chunkCount === 1) {
+              onLog({ type: 'PROCESSING', message: 'Audio data flowing to Deepgram', timestamp: new Date().toISOString() })
+            }
+          }
+        })
+
+        recorder.start(250)
+        onModeChange('live')
+      })
+
+      socket.on('message', (data) => {
+        if (data?.type !== 'Results') return
+        const transcript = data.channel?.alternatives?.[0]?.transcript?.trim()
+        if (!transcript) return
+
+        const confidence = data.channel?.alternatives?.[0]?.confidence ?? null
+        if (data.is_final) {
+          onTranscriptChunk({ timestamp: nowTs(), speaker: 'caller', text: transcript, confidence })
           onInterim('')
         } else {
-          interim += transcript
+          onInterim(transcript)
         }
-      }
-      if (interim) onInterim(interim)
+      })
+
+      socket.on('error', (err) => {
+        onLog({ type: 'ERROR', message: `Deepgram error: ${err?.message || err}`, timestamp: new Date().toISOString() })
+      })
+
+      socket.on('close', (event) => {
+        onLog({ type: 'PROCESSING', message: `Deepgram connection closed (code ${event?.code})`, timestamp: new Date().toISOString() })
+      })
+
+    } catch (err) {
+      onLog({ type: 'ERROR', message: `Deepgram init failed: ${err.message}`, timestamp: new Date().toISOString() })
     }
+  }
 
-    recognition.onerror = (event) => {
-      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-        setMicStatus('ERROR')
-        onModeChange('fallback')
-      } else {
-        setMicStatus('ERROR')
-      }
-    }
-
-    recognition.onstart = () => {
-      setMicStatus('LISTENING')
-      onModeChange('live')
-    }
-
-    recognition.onend = () => {
-      setMicStatus('PAUSED')
-      if (active) {
-        try { recognition.start() } catch {}
-      }
-    }
-
-    recognitionRef.current = recognition
-  }, [])
-
-  useEffect(() => {
-    const recognition = recognitionRef.current
-    if (!recognition) return
-
-    if (active) {
-      try {
-        recognition.start()
-      } catch (err) {
-        if (err.name !== 'InvalidStateError') {
-          onModeChange('fallback')
-        }
-      }
-    } else {
-      try {
-        recognition.stop()
-        setMicStatus('PAUSED')
-      } catch {}
-    }
-  }, [active])
+  function stopTranscription() {
+    mediaRecorderRef.current?.stop()
+    mediaRecorderRef.current = null
+    socketRef.current?.finish?.()
+    socketRef.current = null
+  }
 
   return null
 }
