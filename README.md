@@ -12,7 +12,7 @@ An agentic emergency dispatch dashboard. CLAW listens to live call audio, builds
 Live call audio (system capture) or uploaded audio file
   → Deepgram (real-time transcription)
     → LLM agent (incident model + action proposal)
-      → White Circle API (action verification)
+      → Action verification (local rules)
         → Approved  → Execute + log
         → Flagged   → Supervisor queue (human confirmation required)
 ```
@@ -36,20 +36,14 @@ Each finalised transcript chunk triggers one full agent loop iteration:
 3. The LLM returns a JSON response containing:
    - An updated **incident model** (type, severity, location, casualties, hazards, flags)
    - A **proposed action** (dispatch units / escalate to supervisor / file a report)
-4. The proposed action is sent to White Circle for verification
+4. The proposed action is verified against local safety rules
 5. Result is executed or escalated accordingly
 
 The loop queues incoming transcript chunks if a previous iteration is still running, processing them in order.
 
-### 3. White Circle API
+### 3. Action verification
 
-White Circle is an action verification layer that acts as a hallucination and safety check on every proposed action before it is executed.
-
-**What it checks:**
-- Is the proposed action appropriate for the incident severity?
-- Are the assigned units capable of handling the incident type?
-- Is the agent's confidence sufficient for the stakes involved?
-- Does the action make sense given all active incidents and resource constraints?
+Every proposed action is verified locally before execution using a set of safety rules.
 
 **Verification logic:**
 
@@ -60,11 +54,9 @@ White Circle is an action verification layer that acts as a hallucination and sa
 | Severity 5 with non-escalation action | Always flagged |
 | Dispatch with no units assigned | Flagged |
 
-**If approved:** the action executes immediately. Units are marked deployed, the activity log records the event with a `WC: APPROVED` badge.
+**If approved:** the action executes immediately. Units are marked deployed and the activity log records the event.
 
 **If flagged:** the action is blocked and moved to the Supervisor Queue. The agent loop pauses. A human supervisor must click **CONFIRM** (execute the action) or **OVERRIDE** (discard it). Either resumes the loop.
-
-**Without an API key:** White Circle runs in simulation mode using the same logic locally. The `verified_by` field in the response will show `WHITE_CIRCLE_SIM` instead of the real service.
 
 ### 4. Dashboard panels
 
@@ -72,7 +64,7 @@ White Circle is an action verification layer that acts as a hallucination and sa
 Live transcript lines as they are finalised, each with a Deepgram confidence score. Interim (in-progress) speech appears greyed out. Below the transcript, the live incident model updates in real time with animated field changes.
 
 **Centre — CLAW Activity**
-Streaming log of every agent decision. Each entry shows a timestamp, action type badge (`DISPATCH` / `ESCALATE` / `REPORT` / `BLOCKED` / `ERROR`), the agent's reasoning, and the White Circle result inline.
+Streaming log of every agent decision. Each entry shows a timestamp, action type badge (`DISPATCH` / `ESCALATE` / `REPORT` / `BLOCKED` / `ERROR`), and the agent's reasoning.
 
 **Right — Operations Board**
 - Unit fleet with live status (available / deployed + assigned incident)
@@ -97,9 +89,6 @@ VITE_OPENAI_API_KEY=
 
 # Deepgram — required for audio transcription (free tier at deepgram.com)
 VITE_DEEPGRAM_API_KEY=
-
-# White Circle — optional, simulation runs locally if absent
-VITE_WHITE_CIRCLE_API_KEY=
 ```
 
 Copy `.env.example` to `.env` and fill in your keys.
@@ -174,7 +163,7 @@ Set `VITE_AGENT_PROVIDER=yourprovider` in `.env` and restart.
 | Agent | Pluggable — Anthropic Claude or OpenAI GPT-4o |
 | Transcription | Deepgram nova-2 (live WebSocket + prerecorded) |
 | Audio capture | Browser `getDisplayMedia` API |
-| Action verification | White Circle API |
+| Action verification | Local rules engine |
 | Deployment | Vercel |
 
 No backend. All agent logic runs client-side in the browser.
