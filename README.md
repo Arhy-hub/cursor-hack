@@ -2,8 +2,6 @@
 
 An agentic emergency dispatch dashboard. CLAW listens to live call audio, builds a real-time incident model, and autonomously plans and executes emergency responses — with every action verified before execution.
 
-> **All interactions are clearly labelled TRAINING MODE. This is not connected to real emergency services.**
-
 ---
 
 ## How it works
@@ -11,31 +9,31 @@ An agentic emergency dispatch dashboard. CLAW listens to live call audio, builds
 ### Overview
 
 ```
-Live call audio (system capture)
+Live call audio (system capture) or uploaded audio file
   → Deepgram (real-time transcription)
-    → Claude agent (incident model + action proposal)
+    → LLM agent (incident model + action proposal)
       → White Circle API (action verification)
         → Approved  → Execute + log
         → Flagged   → Supervisor queue (human confirmation required)
 ```
 
-### 1. Audio capture
+### 1. Audio input
 
+**Capture Audio**
 Click **CAPTURE AUDIO**. Chrome opens a screen/audio share dialog. Select **Entire Screen** and tick **Share system audio** at the bottom of the dialog.
 
-CLAW will now hear anything playing through your computer speakers — a WhatsApp call, Telegram call, Teams call, or any other audio source. The caller's voice is transcribed in real time by Deepgram (nova-2 model, en-GB).
+CLAW will hear anything playing through your computer speakers — a WhatsApp call, Telegram call, Teams call, or any other audio source. The caller's voice is transcribed in real time by Deepgram (nova-2 model, en-GB). Each transcript line shows a confidence score (green ≥90%, yellow ≥70%, red <70%).
 
-**Fallback chain:**
-- No Deepgram key → falls back to microphone input via Web Speech API
-- User cancels the dialog → falls back to the scripted ALPHA-7 scenario (A40 road traffic collision, fed automatically every 8 seconds)
+**Upload File**
+Click **UPLOAD FILE** to upload any audio file (MP3, WAV, M4A, etc.). Deepgram transcribes the full file, splits it into utterances, and feeds each one through the agent loop sequentially.
 
 ### 2. Agent loop
 
 Each finalised transcript chunk triggers one full agent loop iteration:
 
 1. Full operational context is assembled — active incidents, unit fleet, pending escalations, full transcript history, current incident model
-2. Sent to Claude (`claude-sonnet-4-20250514`) with a system prompt establishing CLAW's identity and rules
-3. Claude returns a JSON response containing:
+2. Sent to the configured LLM with a system prompt establishing CLAW's identity and rules
+3. The LLM returns a JSON response containing:
    - An updated **incident model** (type, severity, location, casualties, hazards, flags)
    - A **proposed action** (dispatch units / escalate to supervisor / file a report)
 4. The proposed action is sent to White Circle for verification
@@ -71,7 +69,7 @@ White Circle is an action verification layer that acts as a hallucination and sa
 ### 4. Dashboard panels
 
 **Left — Call Feed**
-Live transcript lines as they are finalised. Interim (in-progress) speech appears greyed out. Below the transcript, the live incident model updates in real time with animated field changes.
+Live transcript lines as they are finalised, each with a Deepgram confidence score. Interim (in-progress) speech appears greyed out. Below the transcript, the live incident model updates in real time with animated field changes.
 
 **Centre — CLAW Activity**
 Streaming log of every agent decision. Each entry shows a timestamp, action type badge (`DISPATCH` / `ESCALATE` / `REPORT` / `BLOCKED` / `ERROR`), the agent's reasoning, and the White Circle result inline.
@@ -88,12 +86,20 @@ Streaming log of every agent decision. Each entry shows a timestamp, action type
 ### Environment variables
 
 ```env
-# Required
-VITE_ANTHROPIC_API_KEY=         # Anthropic API key
-VITE_DEEPGRAM_API_KEY=          # Deepgram API key (real-time transcription)
+# Agent provider — options: anthropic, openai (default: anthropic)
+VITE_AGENT_PROVIDER=anthropic
 
-# Optional
-VITE_WHITE_CIRCLE_API_KEY=      # White Circle API key (simulation runs if absent)
+# Anthropic (used when VITE_AGENT_PROVIDER=anthropic)
+VITE_ANTHROPIC_API_KEY=
+
+# OpenAI (used when VITE_AGENT_PROVIDER=openai)
+VITE_OPENAI_API_KEY=
+
+# Deepgram — required for audio transcription (free tier at deepgram.com)
+VITE_DEEPGRAM_API_KEY=
+
+# White Circle — optional, simulation runs locally if absent
+VITE_WHITE_CIRCLE_API_KEY=
 ```
 
 Copy `.env.example` to `.env` and fill in your keys.
@@ -105,7 +111,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` in **Chrome** (Web Speech API fallback requires Chrome; Deepgram works in any browser).
+Open `http://localhost:5173` in **Chrome**.
 
 ### Deploying to Vercel
 
@@ -114,7 +120,49 @@ npm install -g vercel
 vercel
 ```
 
-Set the environment variables in Vercel dashboard → Project → Settings → Environment Variables, then redeploy.
+Set environment variables in Vercel dashboard → Project → Settings → Environment Variables, then redeploy.
+
+---
+
+## Swapping the LLM
+
+The agent is provider-agnostic. Switch models by changing two env vars — no code changes needed.
+
+**Use OpenAI (GPT-4o):**
+```env
+VITE_AGENT_PROVIDER=openai
+VITE_OPENAI_API_KEY=sk-...
+```
+
+**Use Anthropic (Claude):**
+```env
+VITE_AGENT_PROVIDER=anthropic
+VITE_ANTHROPIC_API_KEY=sk-ant-...
+```
+
+**Adding a new provider:**
+
+Create `src/agent/providers/yourprovider.js` with a single export:
+
+```js
+export async function complete(systemPrompt, messages) {
+  // call your API here
+  // messages is an array of { role, content } objects
+  // return the response as a plain string
+}
+```
+
+Then register it in `src/agent/providers/index.js`:
+
+```js
+const providers = {
+  anthropic: () => import('./anthropic.js'),
+  openai: () => import('./openai.js'),
+  yourprovider: () => import('./yourprovider.js'), // add this
+}
+```
+
+Set `VITE_AGENT_PROVIDER=yourprovider` in `.env` and restart.
 
 ---
 
@@ -123,8 +171,8 @@ Set the environment variables in Vercel dashboard → Project → Settings → E
 | Layer | Technology |
 |---|---|
 | Frontend | React + Tailwind CSS |
-| Agent | Anthropic API — `claude-sonnet-4-20250514` |
-| Transcription | Deepgram nova-2 (live WebSocket) |
+| Agent | Pluggable — Anthropic Claude or OpenAI GPT-4o |
+| Transcription | Deepgram nova-2 (live WebSocket + prerecorded) |
 | Audio capture | Browser `getDisplayMedia` API |
 | Action verification | White Circle API |
 | Deployment | Vercel |
@@ -135,6 +183,4 @@ No backend. All agent logic runs client-side in the browser.
 
 ## Mock data
 
-The unit fleet (`src/data/units.js`) and fallback scenario (`src/data/scenario.js`) are static mock data used for demonstration. They are not connected to any real dispatch system.
-
-The fallback scenario simulates a caller reporting an A40 road traffic collision (scenario ID: ALPHA-7) with five transcript lines delivered over approximately 40 seconds.
+The unit fleet (`src/data/units.js`) is static mock data used for demonstration and is not connected to any real dispatch system.

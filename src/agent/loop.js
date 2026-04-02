@@ -1,12 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk'
+import { complete } from './providers/index.js'
 import { SYSTEM_PROMPT, buildMessages } from './prompt.js'
 import { buildContext } from './context.js'
 import { verifyAction } from './whitecircle.js'
-
-const client = new Anthropic({
-  apiKey: import.meta.env.VITE_ANTHROPIC_API_KEY,
-  dangerouslyAllowBrowser: true
-})
 
 export async function runAgentLoop({
   transcriptLine,
@@ -29,7 +24,6 @@ export async function runAgentLoop({
   })
 
   const messages = buildMessages(context)
-
   let rawContent = ''
 
   try {
@@ -39,18 +33,7 @@ export async function runAgentLoop({
       timestamp: new Date().toISOString()
     })
 
-    const stream = await client.messages.stream({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1024,
-      system: SYSTEM_PROMPT,
-      messages
-    })
-
-    for await (const chunk of stream) {
-      if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
-        rawContent += chunk.delta.text
-      }
-    }
+    rawContent = await complete(SYSTEM_PROMPT, messages)
 
     const jsonMatch = rawContent.match(/\{[\s\S]*\}/)
     if (!jsonMatch) throw new Error('No JSON found in agent response')
@@ -62,7 +45,6 @@ export async function runAgentLoop({
 
     const { action_type, confidence } = proposed_action
     const severity = incident_model?.severity ?? 0
-
     const forceEscalate = confidence < 0.75 && severity >= 4
 
     if (forceEscalate && action_type !== 'escalate') {
@@ -81,7 +63,6 @@ export async function runAgentLoop({
         whiteCircle: 'FLAGGED',
         action: proposed_action
       })
-
       onEscalation({
         id: `ESC-${Date.now()}`,
         incident_model,
@@ -89,16 +70,12 @@ export async function runAgentLoop({
         reason: proposed_action.escalation_reason || verification.reason,
         timestamp: new Date().toISOString()
       })
-
       return { blocked: true, incident_model }
     }
 
     if (proposed_action.action_type === 'dispatch' && proposed_action.units?.length > 0) {
       proposed_action.units.forEach(unitId => {
-        onUnitUpdate(unitId, {
-          status: 'deployed',
-          assignedTo: incident_model.incident_id
-        })
+        onUnitUpdate(unitId, { status: 'deployed', assignedTo: incident_model.incident_id })
       })
     }
 
