@@ -2,6 +2,7 @@
 
 An agentic emergency dispatch dashboard. CLAW listens to live call audio, builds a real-time incident model, and autonomously plans and executes emergency responses — with every action verified before execution.
 
+[Video Demo](https://youtu.be/MAjmLNNRyQg)
 ---
 
 ## How it works
